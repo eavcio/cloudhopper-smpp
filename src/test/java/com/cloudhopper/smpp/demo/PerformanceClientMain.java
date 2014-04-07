@@ -296,7 +296,7 @@ public class PerformanceClientMain {
 	 * expecting, it needs to verify it afterwards.
 	 */
 	protected static PduResponse sendRequestAndGetResponse(SmppSession session, PduRequest requestPdu, long timeoutInMillis) throws RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException, InterruptedException {
-		WindowFuture<Integer, PduRequest, PduResponse> future = session.sendRequestPdu(requestPdu, timeoutInMillis, true);
+		WindowFuture<Integer, PduRequest, PduResponse> future = session.sendRequestPdu(requestPdu, timeoutInMillis, false);
 		boolean completedWithinTimeout = future.await();
 
 		if (!completedWithinTimeout) {
