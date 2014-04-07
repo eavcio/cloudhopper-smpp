@@ -26,10 +26,11 @@
             <Pattern>%-23d [%thread] %-5level %logger{32} - %m%n</Pattern>
         </layout>
     </appender>
-    
-    <logger name="com.cloudhopper" level="DEBUG"/>
 
-    <root level="WARN">
-        <appender-ref ref="CONSOLE"/>
+	<logger name="com.cloudhopper" level="WARN"/>
+	<logger name="com.cloudhopper.smpp.demo.PerformanceClientMain" level="INFO"/>
+
+	<root level="WARN">
+	<appender-ref ref="CONSOLE"/>
     </root>
 </configuration>

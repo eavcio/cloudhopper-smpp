@@ -22,24 +22,19 @@ package com.cloudhopper.smpp.demo;
 
 import com.cloudhopper.commons.charset.CharsetUtil;
 import com.cloudhopper.commons.util.DecimalUtil;
-import com.cloudhopper.smpp.PduAsyncResponse;
-import com.cloudhopper.smpp.SmppSessionConfiguration;
-import com.cloudhopper.smpp.SmppBindType;
-import com.cloudhopper.smpp.SmppSession;
+import com.cloudhopper.commons.util.windowing.WindowFuture;
+import com.cloudhopper.smpp.*;
 import com.cloudhopper.smpp.impl.DefaultSmppClient;
 import com.cloudhopper.smpp.impl.DefaultSmppSessionHandler;
-import com.cloudhopper.smpp.type.Address;
-import com.cloudhopper.smpp.pdu.SubmitSm;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import com.cloudhopper.smpp.pdu.*;
+import com.cloudhopper.smpp.type.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.nio.channels.ClosedChannelException;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  *
@@ -52,13 +47,13 @@ public class PerformanceClientMain {
     // performance testing options (just for this sample)
     //
     // total number of sessions (conns) to create
-    static public final int SESSION_COUNT = 10;
-    // size of window per session
-    static public final int WINDOW_SIZE = 50;
+	static public final int SESSION_COUNT = 20;
+	// size of window per session
+	static public final int WINDOW_SIZE = 50;
     // total number of submit to send total across all sessions
-    static public final int SUBMIT_TO_SEND = 2000;
-    // total number of submit sent
-    static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
+	static public final int SUBMIT_TO_SEND = Integer.MAX_VALUE;
+	// total number of submit sent
+	static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
     
     static public void main(String[] args) throws Exception {
         //
@@ -229,28 +224,37 @@ public class PerformanceClientMain {
                 startSendingSignal.await();
                 
                 // all threads compete for processing
-                while (SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
-                    SubmitSm submit = new SubmitSm();
-                    submit.setSourceAddress(new Address((byte)0x03, (byte)0x00, "40404"));
-                    submit.setDestAddress(new Address((byte)0x01, (byte)0x01, "44555519205"));
-                    submit.setShortMessage(textBytes);
-                    // asynchronous send
-                    this.submitRequestSent++;
-                    sendingDone.set(true);
-                    session.sendRequestPdu(submit, 30000, false);
-                }
-                
-                // all threads have sent all submit, we do need to wait for
-                // an acknowledgement for all "inflight" though (synchronize
-                // against the window)
-                logger.info("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
+				int andIncrement = SUBMIT_SENT.getAndIncrement();
+				while (andIncrement < SUBMIT_TO_SEND) {
+					if (andIncrement % 100000 == 0) {
+						logger.info("sent: " + andIncrement);
+					}
+					SubmitSm submit = new SubmitSm();
+					submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
+					submit.setDestAddress(new Address((byte) 0x01, (byte) 0x01, "44555519205"));
+					submit.setShortMessage(textBytes);
+					// asynchronous send
+					this.submitRequestSent++;
+					sendingDone.set(true);
+					try {
+						final PduResponse pduResponse = sendRequestAndGetResponse(session, submit, 30000);
+					} catch (Exception e) {
+//						logger.error(andIncrement+ "  " + submit.toString(), e);
+					}
+					andIncrement = SUBMIT_SENT.getAndIncrement();
+				}
+
+				// all threads have sent all submit, we do need to wait for
+				// an acknowledgement for all "inflight" though (synchronize
+				// against the window)
+				logger.debug("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
 
                 allSubmitResponseReceivedSignal.await();
-                
-                logger.info("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
-                
-                session.unbind(5000);
-            } catch (Exception e) {
+
+				logger.debug("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
+
+				session.unbind(5000);
+			} catch (Exception e) {
                 logger.error("", e);
                 this.cause = e;
             }
@@ -285,4 +289,49 @@ public class PerformanceClientMain {
             }
         }
     }
+
+	/**
+	 * Sends a PDU request and gets a PDU response that matches its sequence #.
+	 * NOTE: This PDU response may not be the actual response the caller was
+	 * expecting, it needs to verify it afterwards.
+	 */
+	protected static PduResponse sendRequestAndGetResponse(SmppSession session, PduRequest requestPdu, long timeoutInMillis) throws RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException, InterruptedException {
+		WindowFuture<Integer, PduRequest, PduResponse> future = session.sendRequestPdu(requestPdu, timeoutInMillis, true);
+		boolean completedWithinTimeout = future.await();
+
+		if (!completedWithinTimeout) {
+			// since this is a "synchronous" request and it timed out, we don't
+			// want it eating up valuable window space - cancel it before returning exception
+			future.cancel();
+			throw new SmppTimeoutException("Unable to get response within [" + timeoutInMillis + " ms]");
+		}
+
+		// 3 possible scenarios once completed: success, failure, or cancellation
+		final boolean success = future.isSuccess();
+		final boolean cancelled = future.isCancelled();
+		final boolean done = future.isDone();
+		final PduResponse response = future.getResponse();
+		final long doneTimestamp = future.getDoneTimestamp();
+		if (success) {
+			return future.getResponse();
+		} else if (future.getCause() != null) {
+			Throwable cause = future.getCause();
+			if (cause instanceof ClosedChannelException) {
+				throw new SmppChannelException("Channel was closed after sending request, but before receiving response", cause);
+			} else {
+				throw new UnrecoverablePduException(cause.getMessage(), cause);
+			}
+		} else {
+			if (cancelled) {
+				logger.error("{} {} {} {} {}", done, success, cancelled, doneTimestamp, response);
+				logger.error("{} {} {} {} {}", future.isDone(), future.isSuccess(), future.isCancelled(), future.getDoneTimestamp(), future.getResponse());
+				throw new RecoverablePduException("Request was cancelled");
+			} else {
+				logger.error("{} {} {} {} {}", done, success, cancelled, doneTimestamp, response);
+				logger.error("{} {} {} {} {}", future.isDone(), future.isSuccess(), future.isCancelled(), future.getDoneTimestamp(), future.getResponse());
+				throw new UnrecoverablePduException("Unable to sendRequestAndGetResponse successfully (future was in strange state)");
+			}
+		}
+	}
 }
+	
