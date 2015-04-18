@@ -3,7 +3,9 @@ Cloudhopper SMPP by Twitter [![Build Status](https://secure.travis-ci.org/twitte
 
 News
 ------------------------
- * Netty 4 beta is available at Maven Central. Please test and submit issues this month (1/2015).
+ * Netty 4 beta is available at Maven Central. Please test and submit issues.
+ Since stability & reliability is critical for this library and how netty-4
+ required significant changes -- we still need your help with beta testing.
 
         <dependency>
           <groupId>com.cloudhopper</groupId>
@@ -71,7 +73,7 @@ Just add the following dependency to your project maven pom.xml:
     <dependency>
       <groupId>com.cloudhopper</groupId>
       <artifactId>ch-smpp</artifactId>
-      <version>[5.0.0,)</version>
+      <version>5.0.8</version>
     </dependency>
 
 Demo Code / Tutorials
@@ -94,6 +96,7 @@ by Maven:
     make ssl-client
     make ssl-server
     make persist-client
+    make server-echo
 
 On Windows, the examples can run with `nmake` instead of `make`.
 
@@ -110,6 +113,8 @@ You'll see the client bind to the server and a few different type of requests
 exchanged back and forth.
 
 You can also try `make persist-client` instead of `make client` which demonstrates a persistent SMPP connection.
+
+`make server-echo` will echo back any MT as an MO. This makes it easier to test handling of MO messages.
 
 User Contributed Demos
 ----------------------
@@ -128,6 +133,6 @@ Please let us know if you have other tutorials worth mentioning!
 License
 -------
 
-Copyright (C) 2009-2014 Twitter, Inc.
+Copyright (C) 2009-2015 Twitter, Inc.
 
 This work is licensed under the Apache License, Version 2.0. See LICENSE for details.
