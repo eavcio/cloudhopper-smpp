@@ -34,6 +34,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -356,6 +357,8 @@ public class PerformanceClientMain2 {
     }
 
     private static class DeliveryReceiptReceivingMonitor implements Runnable {
+        private static final Logger log = LoggerFactory.getLogger(DeliveryReceiptReceivingMonitor.class);
+
         private CountDownLatch stopReceivingSignal;
         private ClientSessionTask[] tasks;
         private long lastDrCount;
@@ -367,27 +370,31 @@ public class PerformanceClientMain2 {
 
         @Override
         public void run() {
-            while (isDr()) {
-                try {
-                    Thread.sleep(1000);
-                    int drCount = 0;
-                    boolean sendingDone = true;
-                    for (int i = 0; i < tasks.length; i++) {
-                        ClientSessionTask task = tasks[i];
-                        drCount += task.counters.getRxDeliverSM().getRequest();
-                        if (task.config.getType() != SmppBindType.RECEIVER) {
-                            sendingDone = sendingDone && task.sendingMtDoneTimestamp != null;
+            try {
+                while (isDr()) {
+                    try {
+                        Thread.sleep(1000);
+                        int drCount = 0;
+                        boolean sendingDone = true;
+                        for (int i = 0; i < tasks.length; i++) {
+                            ClientSessionTask task = tasks[i];
+                            drCount += task.counters.getRxDeliverSM().getRequest();
+                            if (task.config.getType() != SmppBindType.RECEIVER) {
+                                sendingDone = sendingDone && task.sendingMtDoneTimestamp != null;
+                            }
                         }
-                    }
-                    if (sendingDone && lastDrCount - drCount == 0) {
-                        logger.info("No more DRs are coming, stop receiving.");
-                        stopReceivingSignal.countDown();
+                        if (sendingDone && lastDrCount - drCount == 0) {
+                            logger.info("No more DRs are coming, stop receiving.");
+                            stopReceivingSignal.countDown();
+                            return;
+                        }
+                        lastDrCount = drCount;
+                    } catch (InterruptedException e) {
                         return;
                     }
-                    lastDrCount = drCount;
-                } catch (InterruptedException e) {
-                    return;
                 }
+            } catch (Exception e) {
+                log.error("", e);
             }
 
         }
@@ -412,38 +419,50 @@ public class PerformanceClientMain2 {
 
         @Override
         public void run() {
-            while (true) {
-                int totalSubmitSent = 0;
-                int totalDrReceived = 0;
-                int totalSubmitResponseOk = 0;
-                int totalSubmitResponseError = 0;
-                for (int i = 0; i < SESSION_COUNT; i++) {
-                    SmppSessionCounters counters = tasks[i].counters;
-                    if (counters != null) {
-                        ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
-                        totalSubmitSent += txSubmitSM.getRequest();
-                        totalSubmitResponseOk += max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
-                        totalSubmitResponseError += txSubmitSM.getResponse() - max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
-                        totalDrReceived += counters.getRxDeliverSM().getRequest();
+            try {
+                int j = 0;
+                while (true) {
+                    int totalSubmitSent = 0;
+                    int totalDrReceived = 0;
+                    int totalSubmitResponseOk = 0;
+                    int totalSubmitResponseError = 0;
+                    for (int i = 0; i < SESSION_COUNT; i++) {
+                        SmppSessionCounters counters = tasks[i].counters;
+                        if (counters != null) {
+                            ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
+                            totalSubmitSent += txSubmitSM.getRequest();
+                            for (Map.Entry<Integer, Integer> entry : txSubmitSM.getResponseCommandStatusCounter().createSortedMapSnapshot().entrySet()) {
+                                if (entry.getKey() == 0) {
+                                    totalSubmitResponseOk += entry.getValue();
+                                } else {
+                                    totalSubmitResponseError += entry.getValue();
+                                }
+                            }
+                            totalDrReceived += counters.getRxDeliverSM().getRequest();
+                        }
                     }
-                }
 
-                int sent = totalSubmitSent - lastTotalSubmitSent;
-                int ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
-                int error = totalSubmitResponseError - lastTotalSubmitResponseError;
-                int dr = totalDrReceived - lastTotalDrReceived;
-                log.info("throughput: sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
-                lastTotalSubmitSent = totalSubmitSent;
-                lastTotalDrReceived = totalDrReceived;
-                lastTotalSubmitResponseOk = totalSubmitResponseOk;
-                lastTotalSubmitResponseError = totalSubmitResponseError;
+                    int sent = totalSubmitSent - lastTotalSubmitSent;
+                    int ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
+                    int error = totalSubmitResponseError - lastTotalSubmitResponseError;
+                    int dr = totalDrReceived - lastTotalDrReceived;
+                    log.info("throughput: sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
+                    if (++j % 10 == 0) {
+                        log.info("     TOTAL: sent {}, ok {}, error {}, dr {}", totalSubmitSent, totalSubmitResponseOk, totalSubmitResponseError, totalDrReceived);
+                    }
+                    lastTotalSubmitSent = totalSubmitSent;
+                    lastTotalSubmitResponseOk = totalSubmitResponseOk;
+                    lastTotalSubmitResponseError = totalSubmitResponseError;
+                    lastTotalDrReceived = totalDrReceived;
 
-                try {
                     Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    return;
                 }
+            } catch (InterruptedException e) {
+                return;
+            } catch (Exception e) {
+                log.error("", e);
             }
         }
     }
+
 }
