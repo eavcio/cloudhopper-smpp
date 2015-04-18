@@ -109,9 +109,7 @@ public class PerformanceClientMain2 {
             tasks[i] = new ClientSessionTask(allSessionsBoundSignal, startSendingSignal, stopReceivingSignal, clientBootstrap, getSmppSessionConfiguration(smppBindType));
             taskExecutor.submit(tasks[i]);
         }
-        taskExecutor.submit(new DeliveryReceiptReceivingMonitor(stopReceivingSignal, tasks));
-        ExecutorService loggingExecutor = Executors.newCachedThreadPool();
-        loggingExecutor.submit(new ThroughputLoggingTask(tasks));
+        ExecutorService supportExecutor = Executors.newCachedThreadPool();
 
         try {
             // wait for all sessions to bind
@@ -121,6 +119,9 @@ public class PerformanceClientMain2 {
                 logger.info("Sending signal to start test...");
                 long startTimeMillis = System.currentTimeMillis();
                 startSendingSignal.countDown();
+
+                supportExecutor.submit(new DeliveryReceiptReceivingMonitor(stopReceivingSignal, tasks));
+                supportExecutor.submit(new ThroughputLoggingTask(tasks));
 
                 taskExecutor.shutdown();
                 taskExecutor.awaitTermination(3, TimeUnit.DAYS);
@@ -135,7 +136,7 @@ public class PerformanceClientMain2 {
             logger.info("Shutting down client bootstrap and executors...");
             // this is required to not causing server to hang from non-daemon threads
             // this also makes sure all open Channels are closed to I *think*
-            loggingExecutor.shutdownNow();
+            supportExecutor.shutdownNow();
             taskExecutor.shutdownNow();
             clientBootstrap.destroy();
             monitorExecutor.shutdownNow();
@@ -255,7 +256,7 @@ public class PerformanceClientMain2 {
                 // don't start sending until signalled
                 allSessionsBoundSignal.countDown();
                 if (config.getType() == SmppBindType.RECEIVER) {
-                    stopReceivingSignal.await(3, TimeUnit.DAYS);
+                    waitForDr();
                 } else {
                     startSending();
                     // all threads have sent all submit, we do need to wait for
@@ -267,7 +268,7 @@ public class PerformanceClientMain2 {
                     logger.debug("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
 
                     if (config.getType() == SmppBindType.TRANSCEIVER) {
-                        stopReceivingSignal.await(3, TimeUnit.DAYS);
+                        waitForDr();
                     }
                 }
 
@@ -279,6 +280,14 @@ public class PerformanceClientMain2 {
             }
         }
 
+        private void waitForDr() throws InterruptedException {
+            while (session.isBound()) {
+                if (stopReceivingSignal.await(5, TimeUnit.SECONDS)) {
+                    break;
+                }
+            }
+        }
+
         private void startSending() throws InterruptedException, RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException {
             try {
                 String text160 = "\u20AC Lorem [ipsum] dolor sit amet, consectetur adipiscing elit. Proin feugiat, leo id commodo tincidunt, nibh diam ornare est, vitae accumsan risus lacus sed sem metus.";
@@ -287,7 +296,7 @@ public class PerformanceClientMain2 {
                 startSendingSignal.await();
 
                 // all threads compete for processing
-                while (SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
+                while (session.isBound() && SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
                     SubmitSm submit = new SubmitSm();
                     submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
                     submit.setDestAddress(new Address((byte) 0x01, (byte) 0x01, "44555519205"));
@@ -380,7 +389,7 @@ public class PerformanceClientMain2 {
                             ClientSessionTask task = tasks[i];
                             drCount += task.counters.getRxDeliverSM().getRequest();
                             if (task.config.getType() != SmppBindType.RECEIVER) {
-                                sendingDone = sendingDone && task.sendingMtDoneTimestamp != null;
+                                sendingDone = sendingDone && (task.sendingMtDoneTimestamp != null || !task.session.isBound());
                             }
                         }
                         if (sendingDone && lastDrCount - drCount == 0) {
