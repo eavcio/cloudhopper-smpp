@@ -25,8 +25,10 @@ import com.cloudhopper.commons.util.DecimalUtil;
 import com.cloudhopper.smpp.*;
 import com.cloudhopper.smpp.impl.DefaultSmppClient;
 import com.cloudhopper.smpp.impl.DefaultSmppSessionHandler;
+import com.cloudhopper.smpp.pdu.PduRequest;
+import com.cloudhopper.smpp.pdu.PduResponse;
 import com.cloudhopper.smpp.pdu.SubmitSm;
-import com.cloudhopper.smpp.type.Address;
+import com.cloudhopper.smpp.type.*;
 import com.cloudhopper.smpp.util.ConcurrentCommandCounter;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.slf4j.Logger;
@@ -35,10 +37,6 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- *
- * @author joelauer (twitter: @jjlauer or <a href="http://twitter.com/jjlauer" target=window>http://twitter.com/jjlauer</a>)
- */
 public class PerformanceClientMain2 {
     private static final Logger logger = LoggerFactory.getLogger(PerformanceClientMain2.class);
 
@@ -50,10 +48,11 @@ public class PerformanceClientMain2 {
     // size of window per session
     static public final int WINDOW_SIZE = 50;
     // total number of submit to send total across all sessions
-    static public final int SUBMIT_TO_SEND = 2000;
+    static public final int SUBMIT_TO_SEND = 200000;
     // total number of submit sent
     static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
-    
+    static public final boolean DELIVERY_REPORTS = true;
+
     static public void main(String[] args) throws Exception {
         //
         // setup 3 things required for any session we plan on creating
@@ -62,11 +61,11 @@ public class PerformanceClientMain2 {
         // create and assign the NioEventLoopGroup instances to handle event processing,
         // such as accepting new connections, receiving data, writing data, and so on.
         NioEventLoopGroup group = new NioEventLoopGroup();
-        
+
         // to enable automatic expiration of requests, a second scheduled executor
         // is required which is what a monitor task will be executed with - this
         // is probably a thread pool that can be shared with between all client bootstraps
-        ScheduledThreadPoolExecutor monitorExecutor = (ScheduledThreadPoolExecutor)Executors.newScheduledThreadPool(1, new ThreadFactory() {
+        ScheduledThreadPoolExecutor monitorExecutor = (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(1, new ThreadFactory() {
             private AtomicInteger sequence = new AtomicInteger(0);
 
             @Override
@@ -74,10 +73,10 @@ public class PerformanceClientMain2 {
                 Thread t = new Thread(r);
                 t.setName("SmppClientSessionWindowMonitorPool-" + sequence.getAndIncrement());
                 t.setDaemon(true);
-               return t;
+                return t;
             }
         });
-        
+
         // a single instance of a client bootstrap can technically be shared
         // between any sessions that are created (a session can go to any different
         // number of SMSCs) - each session created under
@@ -90,14 +89,64 @@ public class PerformanceClientMain2 {
         // the executor passed in here
         DefaultSmppClient clientBootstrap = new DefaultSmppClient(group, monitorExecutor);
 
+
+        // various latches used to signal when things are ready
+        ResultCountDownLatch allSessionsBoundSignal = new ResultCountDownLatch(SESSION_COUNT);
+        CountDownLatch startSendingSignal = new CountDownLatch(1);
+        CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
+
+        // create all session runners and executors to run them
+        ThreadPoolExecutor taskExecutor = (ThreadPoolExecutor) Executors.newCachedThreadPool();
+        ClientSessionTask[] tasks = new ClientSessionTask[SESSION_COUNT];
+
+        for (int i = 0; i < SESSION_COUNT; i++) {
+            SmppBindType smppBindType = i % 2 == 0 ? SmppBindType.RECEIVER : SmppBindType.TRANSMITTER;
+//            SmppBindType smppBindType = SmppBindType.TRANSCEIVER;
+            tasks[i] = new ClientSessionTask(allSessionsBoundSignal, startSendingSignal, stopReceivingSignal, clientBootstrap, getSmppSessionConfiguration(smppBindType));
+            taskExecutor.submit(tasks[i]);
+        }
+        taskExecutor.submit(new DeliveryReceiptReceivingMonitor(stopReceivingSignal, tasks));
+        ExecutorService loggingExecutor = Executors.newCachedThreadPool();
+        loggingExecutor.submit(new ThroughputLoggingTask(tasks));
+
+        try {
+            // wait for all sessions to bind
+            logger.info("Waiting up to 7 seconds for all sessions to bind...");
+            if (allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
+
+                logger.info("Sending signal to start test...");
+                long startTimeMillis = System.currentTimeMillis();
+                startSendingSignal.countDown();
+
+                taskExecutor.shutdown();
+                taskExecutor.awaitTermination(3, TimeUnit.DAYS);
+
+                printStats(tasks, startTimeMillis);
+
+                logger.info("Done. Exiting");
+            } else {
+                logger.info("Test failed. Exiting.");
+            }
+        } finally {
+            logger.info("Shutting down client bootstrap and executors...");
+            // this is required to not causing server to hang from non-daemon threads
+            // this also makes sure all open Channels are closed to I *think*
+            loggingExecutor.shutdownNow();
+            taskExecutor.shutdownNow();
+            clientBootstrap.destroy();
+            monitorExecutor.shutdownNow();
+        }
+    }
+
+    private static SmppSessionConfiguration getSmppSessionConfiguration(SmppBindType smppBindType) {
         // same configuration for each client runner
         SmppSessionConfiguration config = new SmppSessionConfiguration();
         config.setWindowSize(WINDOW_SIZE);
         config.setName("Tester.Session.0");
-        config.setType(SmppBindType.TRANSCEIVER);
+        config.setType(smppBindType);
         config.setHost("127.0.0.1");
         config.setPort(5000);
-        config.setConnectTimeout(10000);
+        config.setConnectTimeout(5000);
         config.setSystemId("1234567890");
         config.setPassword("password");
         config.getLoggingOptions().setLogBytes(false);
@@ -105,75 +154,60 @@ public class PerformanceClientMain2 {
         config.setRequestExpiryTimeout(30000);
         config.setWindowMonitorInterval(15000);
         config.setCountersEnabled(true);
+        return config;
+    }
 
-        // various latches used to signal when things are ready
-        ResultCountDownLatch allSessionsBoundSignal = new ResultCountDownLatch(SESSION_COUNT);
-        CountDownLatch startSendingSignal = new CountDownLatch(1);
-        
-        // create all session runners and executors to run them
-        ThreadPoolExecutor taskExecutor = (ThreadPoolExecutor)Executors.newCachedThreadPool();
-        ClientSessionTask[] tasks = new ClientSessionTask[SESSION_COUNT];
-        for (int i = 0; i < SESSION_COUNT; i++) {
-            tasks[i] = new ClientSessionTask(allSessionsBoundSignal, startSendingSignal, clientBootstrap, config);
-            taskExecutor.submit(tasks[i]);
+    private static void printStats(ClientSessionTask[] tasks, long startTimeMillis) {
+        long stopTimeMillisMt = -1;
+        for (ClientSessionTask task : tasks) {
+            if (task.sendingMtDoneTimestamp != null) {
+                stopTimeMillisMt = Math.max(task.sendingMtDoneTimestamp, stopTimeMillisMt);
+            }
         }
-        
-        // wait for all sessions to bind
-        logger.info("Waiting up to 7 seconds for all sessions to bind...");
-        if (allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
-
-            logger.info("Sending signal to start test...");
-            long startTimeMillis = System.currentTimeMillis();
-            startSendingSignal.countDown();
-
-            // wait for all tasks to finish
-            taskExecutor.shutdown();
-            taskExecutor.awaitTermination(3, TimeUnit.DAYS);
-            long stopTimeMillis = System.currentTimeMillis();
-
-            // did everything succeed?
-            int actualSubmitSent = 0;
-            int sessionFailures = 0;
-            for (int i = 0; i < SESSION_COUNT; i++) {
-                if (tasks[i].getCause() != null) {
-                    sessionFailures++;
-                    logger.error("Task #" + i + " failed with exception: " + tasks[i].getCause());
-                } else {
-                    actualSubmitSent += tasks[i].getSubmitRequestSent();
-                }
+        // did everything succeed?
+        int actualSubmitSent = 0;
+        int sessionFailures = 0;
+        int actualDrReceived = 0;
+        int actualSubmitResponseOk = 0;
+        int actualSubmitResponseError = 0;
+        for (int i = 0; i < SESSION_COUNT; i++) {
+            if (tasks[i].getCause() != null) {
+                sessionFailures++;
+                logger.error("Task #" + i + " failed with exception: " + tasks[i].getCause());
+            } else {
+                ConcurrentCommandCounter txSubmitSM = tasks[i].counters.getTxSubmitSM();
+                actualSubmitSent += txSubmitSM.getRequest();
+                actualSubmitResponseOk += txSubmitSM.getResponseCommandStatusCounter().get(0);
+                actualSubmitResponseError += txSubmitSM.getResponse() - txSubmitSM.getResponseCommandStatusCounter().get(0);
+                actualDrReceived += tasks[i].counters.getRxDeliverSM().getRequest();
             }
+        }
 
-            logger.info("Performance client finished:");
-            logger.info("       Sessions: " + SESSION_COUNT);
-            logger.info("    Window Size: " + WINDOW_SIZE);
-            logger.info("Sessions Failed: " + sessionFailures);
-            logger.info("           Time: " + (stopTimeMillis - startTimeMillis) + " ms");
-            logger.info("  Target Submit: " + SUBMIT_TO_SEND);
-            logger.info("  Actual Submit: " + actualSubmitSent);
-            double throughput = (double) actualSubmitSent / ((double) (stopTimeMillis - startTimeMillis) / (double) 1000);
-            logger.info("     Throughput: " + DecimalUtil.toString(throughput, 3) + " per sec");
+        logger.info("Performance client finished:");
+        logger.info("       Sessions: " + SESSION_COUNT);
+        logger.info("    Window Size: " + WINDOW_SIZE);
+        logger.info("Sessions Failed: " + sessionFailures);
+        logger.info("           Time: " + (stopTimeMillisMt - startTimeMillis) + " ms");
+        logger.info("  Target Submit: " + SUBMIT_TO_SEND);
+        logger.info("  Actual Submit: " + actualSubmitSent);
+        logger.info(" Submit Resp Ok: " + actualSubmitResponseOk);
+        logger.info("Submit Resp Err: " + actualSubmitResponseError);
+        logger.info("    DR Received: " + actualDrReceived);
+        double throughputMt = (double) actualSubmitSent / ((double) (stopTimeMillisMt - startTimeMillis) / (double) 1000);
+        logger.info("   Throughput MT: " + DecimalUtil.toString(throughputMt, 3) + " per sec");
 
-            for (int i = 0; i < SESSION_COUNT; i++) {
-                if (tasks[i].session != null && tasks[i].session.hasCounters()) {
-                    logger.info(" Session " + i + ": submitSM {}", tasks[i].session.getCounters().getTxSubmitSM());
-                }
+        for (int i = 0; i < SESSION_COUNT; i++) {
+            ClientSessionTask task = tasks[i];
+            if (task.counters != null && task.config.getType() != SmppBindType.RECEIVER) {
+                logger.info(" Session " + i + ": submitSM {}", task.session.getCounters().getTxSubmitSM());
             }
-
-            // this is required to not causing server to hang from non-daemon threads
-            // this also makes sure all open Channels are closed to I *think*
-            logger.info("Shutting down client bootstrap and executors...");
-            clientBootstrap.destroy();
-            monitorExecutor.shutdownNow();
-
-            logger.info("Done. Exiting");
-        } else {
-            logger.info("Shutting down client bootstrap and executors...");
-            taskExecutor.shutdownNow();
-            clientBootstrap.destroy();
-            monitorExecutor.shutdownNow();
-            logger.info("Test failed.");
-          
-        } 
+        }
+        for (int i = 0; i < SESSION_COUNT; i++) {
+            ClientSessionTask task = tasks[i];
+            if (task.counters != null && task.config.getType() != SmppBindType.TRANSMITTER) {
+                logger.info(" Session " + i + ": deliverSm {}", task.session.getCounters().getRxDeliverSM());
+            }
+        }
     }
 
 
@@ -182,64 +216,57 @@ public class PerformanceClientMain2 {
         private SmppSession session;
         private ResultCountDownLatch allSessionsBoundSignal;
         private CountDownLatch startSendingSignal;
+        private CountDownLatch stopReceivingSignal;
         private DefaultSmppClient clientBootstrap;
         private SmppSessionConfiguration config;
         private Exception cause;
-        protected ConcurrentCommandCounter txSubmitSM;
+        protected SmppSessionCounters counters;
+        private volatile Long sendingMtDoneTimestamp;
 
-        public ClientSessionTask(ResultCountDownLatch allSessionsBoundSignal, CountDownLatch startSendingSignal, DefaultSmppClient clientBootstrap, SmppSessionConfiguration config) {
+        public ClientSessionTask(ResultCountDownLatch allSessionsBoundSignal, CountDownLatch startSendingSignal, CountDownLatch stopReceivingSignal, DefaultSmppClient clientBootstrap, SmppSessionConfiguration config) {
             this.allSessionsBoundSignal = allSessionsBoundSignal;
             this.startSendingSignal = startSendingSignal;
+            this.stopReceivingSignal = stopReceivingSignal;
             this.clientBootstrap = clientBootstrap;
             this.config = config;
         }
-        
+
         public Exception getCause() {
             return this.cause;
         }
-        
-        public int getSubmitRequestSent() {
-            return txSubmitSM.getRequest();
-        }
-        
+
         @Override
         public void run() {
             // a countdownlatch will be used to eventually wait for all responses
             // to be received by this thread since we don't want to exit too early
             CountDownLatch allSubmitResponseReceivedSignal = new CountDownLatch(1);
-            
             DefaultSmppSessionHandler sessionHandler = new ClientSmppSessionHandler(allSubmitResponseReceivedSignal);
-            String text160 = "\u20AC Lorem [ipsum] dolor sit amet, consectetur adipiscing elit. Proin feugiat, leo id commodo tincidunt, nibh diam ornare est, vitae accumsan risus lacus sed sem metus.";
-            byte[] textBytes = CharsetUtil.encode(text160, CharsetUtil.CHARSET_GSM);
-            
+
             try {
                 // create session a session by having the bootstrap connect a
                 // socket, send the bind request, and wait for a bind response
                 session = clientBootstrap.bind(config, sessionHandler);
-                txSubmitSM = session.getCounters().getTxSubmitSM();
-                
+                counters = session.getCounters();
+
                 // don't start sending until signalled
                 allSessionsBoundSignal.countDown();
-                startSendingSignal.await();
-                
-                // all threads compete for processing
-                while (SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
-                    SubmitSm submit = new SubmitSm();
-                    submit.setSourceAddress(new Address((byte)0x03, (byte)0x00, "40404"));
-                    submit.setDestAddress(new Address((byte)0x01, (byte)0x01, "44555519205"));
-                    submit.setShortMessage(textBytes);
-                    session.sendRequestPdu(submit, 30000, false);
-                }
-                
-                // all threads have sent all submit, we do need to wait for
-                // an acknowledgement for all "inflight" though (synchronize
-                // against the window)
-                logger.info("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
+                if (config.getType() == SmppBindType.RECEIVER) {
+                    stopReceivingSignal.await(3, TimeUnit.DAYS);
+                } else {
+                    startSending();
+                    // all threads have sent all submit, we do need to wait for
+                    // an acknowledgement for all "inflight" though (synchronize
+                    // against the window)
+                    logger.info("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
 
-                allSubmitResponseReceivedSignal.await();
-                
-                logger.info("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
-                
+                    allSubmitResponseReceivedSignal.await();
+                    logger.info("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
+
+                    if (config.getType() == SmppBindType.TRANSCEIVER) {
+                        stopReceivingSignal.await(3, TimeUnit.DAYS);
+                    }
+                }
+
                 session.unbind(5000);
             } catch (Exception e) {
                 allSessionsBoundSignal.fail();
@@ -247,16 +274,44 @@ public class PerformanceClientMain2 {
                 this.cause = e;
             }
         }
-        
+
+        private void startSending() throws InterruptedException, RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException {
+            try {
+                String text160 = "\u20AC Lorem [ipsum] dolor sit amet, consectetur adipiscing elit. Proin feugiat, leo id commodo tincidunt, nibh diam ornare est, vitae accumsan risus lacus sed sem metus.";
+                byte[] textBytes = CharsetUtil.encode(text160, CharsetUtil.CHARSET_GSM);
+
+                startSendingSignal.await();
+
+                // all threads compete for processing
+                while (SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
+                    SubmitSm submit = new SubmitSm();
+                    submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
+                    submit.setDestAddress(new Address((byte) 0x01, (byte) 0x01, "44555519205"));
+                    if (DELIVERY_REPORTS) {
+                        submit.setRegisteredDelivery(SmppConstants.REGISTERED_DELIVERY_INTERMEDIATE_NOTIFICATION_REQUESTED);
+                    }
+                    submit.setShortMessage(textBytes);
+                    session.sendRequestPdu(submit, 30000, false);
+                }
+            } finally {
+                sendingMtDoneTimestamp = System.currentTimeMillis();
+            }
+        }
+
         class ClientSmppSessionHandler extends DefaultSmppSessionHandler {
 
             private CountDownLatch allSubmitResponseReceivedSignal;
-            
+
             public ClientSmppSessionHandler(CountDownLatch allSubmitResponseReceivedSignal) {
                 super(logger);
                 this.allSubmitResponseReceivedSignal = allSubmitResponseReceivedSignal;
             }
-            
+
+            @Override
+            public PduResponse firePduRequestReceived(PduRequest pduRequest) {
+                return pduRequest.createResponse();
+            }
+
             @Override
             public void fireChannelUnexpectedlyClosed() {
                 // this is an error we didn't really expect for perf testing
@@ -267,33 +322,125 @@ public class PerformanceClientMain2 {
 
             @Override
             public void fireExpectedPduResponseReceived(PduAsyncResponse pduAsyncResponse) {
-                if (txSubmitSM.getResponse() >= txSubmitSM.getRequest()) {
+                if (counters.getTxSubmitSM().getResponse() >= counters.getTxSubmitSM().getRequest()) {
                     this.allSubmitResponseReceivedSignal.countDown();
                 }
             }
         }
     }
-    
+
     static class ResultCountDownLatch extends CountDownLatch {
-        boolean broken = false;
+        volatile boolean broken = false;
+
         public ResultCountDownLatch(int sessionCount) {
             super(sessionCount);
         }
-    
+
         @Override
         public boolean await(long timeout, TimeUnit unit) throws InterruptedException {
             boolean await = super.await(timeout, unit);
             return await && !broken;
         }
-    
-        public void fail()  {
+
+        public void fail() {
             broken = true;
             while (this.getCount() > 0) {
                 this.countDown();
             }
-            
+
         }
-        
+
     }
-    
+
+    private static class DeliveryReceiptReceivingMonitor implements Runnable {
+        private CountDownLatch stopReceivingSignal;
+        private ClientSessionTask[] tasks;
+        private long lastDrCount;
+
+        public DeliveryReceiptReceivingMonitor(CountDownLatch stopReceivingSignal, ClientSessionTask[] tasks) {
+            this.stopReceivingSignal = stopReceivingSignal;
+            this.tasks = tasks;
+        }
+
+        @Override
+        public void run() {
+            while (isDr()) {
+                try {
+                    Thread.sleep(1000);
+                    int drCount = 0;
+                    boolean sendingDone = true;
+                    for (int i = 0; i < tasks.length; i++) {
+                        ClientSessionTask task = tasks[i];
+                        drCount += task.counters.getRxDeliverSM().getRequest();
+                        if (task.config.getType() != SmppBindType.RECEIVER) {
+                            sendingDone = sendingDone && task.sendingMtDoneTimestamp != null;
+                        }
+                    }
+                    if (sendingDone && lastDrCount - drCount == 0) {
+                        logger.info("No more DRs are coming, stop receiving.");
+                        stopReceivingSignal.countDown();
+                        return;
+                    }
+                    lastDrCount = drCount;
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+
+        }
+
+        private boolean isDr() {
+            return DELIVERY_REPORTS;
+        }
+    }
+
+    private static class ThroughputLoggingTask implements Runnable {
+        private static final Logger log = LoggerFactory.getLogger("perftest.throughput");
+
+        private ClientSessionTask[] tasks;
+        int lastTotalSubmitSent = 0;
+        int lastTotalDrReceived = 0;
+        int lastTotalSubmitResponseOk = 0;
+        int lastTotalSubmitResponseError = 0;
+
+        public ThroughputLoggingTask(ClientSessionTask[] tasks) {
+            this.tasks = tasks;
+        }
+
+        @Override
+        public void run() {
+            while (true) {
+                int totalSubmitSent = 0;
+                int totalDrReceived = 0;
+                int totalSubmitResponseOk = 0;
+                int totalSubmitResponseError = 0;
+                for (int i = 0; i < SESSION_COUNT; i++) {
+                    SmppSessionCounters counters = tasks[i].counters;
+                    if (counters != null) {
+                        ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
+                        totalSubmitSent += txSubmitSM.getRequest();
+                        totalSubmitResponseOk += txSubmitSM.getResponseCommandStatusCounter().get(0);
+                        totalSubmitResponseError += txSubmitSM.getResponse() - txSubmitSM.getResponseCommandStatusCounter().get(0);
+                        totalDrReceived += counters.getRxDeliverSM().getRequest();
+                    }
+                }
+
+                int sent = totalSubmitSent - lastTotalSubmitSent;
+                int ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
+                int error = totalSubmitResponseError - lastTotalSubmitResponseError;
+                int dr = totalDrReceived - lastTotalDrReceived;
+                log.info("throughput: sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
+                lastTotalSubmitSent = totalSubmitSent;
+                lastTotalDrReceived = totalDrReceived;
+                lastTotalSubmitResponseOk = totalSubmitResponseOk;
+                lastTotalSubmitResponseError = totalSubmitResponseError;
+
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }
+    }
 }
