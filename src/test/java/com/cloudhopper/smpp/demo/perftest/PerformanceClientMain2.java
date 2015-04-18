@@ -37,6 +37,8 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static java.lang.Math.max;
+
 public class PerformanceClientMain2 {
     private static final Logger logger = LoggerFactory.getLogger(PerformanceClientMain2.class);
 
@@ -46,12 +48,13 @@ public class PerformanceClientMain2 {
     // total number of sessions (conns) to create
     static public final int SESSION_COUNT = 10;
     // size of window per session
-    static public final int WINDOW_SIZE = 50;
+    static public final int WINDOW_SIZE = 1;
     // total number of submit to send total across all sessions
     static public final int SUBMIT_TO_SEND = 200000;
     // total number of submit sent
     static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
     static public final boolean DELIVERY_REPORTS = true;
+    private static final int TIMEOUT_MILLIS = 10000;
 
     static public void main(String[] args) throws Exception {
         //
@@ -161,7 +164,7 @@ public class PerformanceClientMain2 {
         long stopTimeMillisMt = -1;
         for (ClientSessionTask task : tasks) {
             if (task.sendingMtDoneTimestamp != null) {
-                stopTimeMillisMt = Math.max(task.sendingMtDoneTimestamp, stopTimeMillisMt);
+                stopTimeMillisMt = max(task.sendingMtDoneTimestamp, stopTimeMillisMt);
             }
         }
         // did everything succeed?
@@ -177,8 +180,8 @@ public class PerformanceClientMain2 {
             } else {
                 ConcurrentCommandCounter txSubmitSM = tasks[i].counters.getTxSubmitSM();
                 actualSubmitSent += txSubmitSM.getRequest();
-                actualSubmitResponseOk += txSubmitSM.getResponseCommandStatusCounter().get(0);
-                actualSubmitResponseError += txSubmitSM.getResponse() - txSubmitSM.getResponseCommandStatusCounter().get(0);
+                actualSubmitResponseOk += max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
+                actualSubmitResponseError += txSubmitSM.getResponse() - max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
                 actualDrReceived += tasks[i].counters.getRxDeliverSM().getRequest();
             }
         }
@@ -257,10 +260,10 @@ public class PerformanceClientMain2 {
                     // all threads have sent all submit, we do need to wait for
                     // an acknowledgement for all "inflight" though (synchronize
                     // against the window)
-                    logger.info("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
+                    logger.debug("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
 
                     allSubmitResponseReceivedSignal.await();
-                    logger.info("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
+                    logger.debug("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
 
                     if (config.getType() == SmppBindType.TRANSCEIVER) {
                         stopReceivingSignal.await(3, TimeUnit.DAYS);
@@ -291,7 +294,7 @@ public class PerformanceClientMain2 {
                         submit.setRegisteredDelivery(SmppConstants.REGISTERED_DELIVERY_INTERMEDIATE_NOTIFICATION_REQUESTED);
                     }
                     submit.setShortMessage(textBytes);
-                    session.sendRequestPdu(submit, 30000, false);
+                    session.sendRequestPdu(submit, TIMEOUT_MILLIS, false);
                 }
             } finally {
                 sendingMtDoneTimestamp = System.currentTimeMillis();
@@ -419,8 +422,8 @@ public class PerformanceClientMain2 {
                     if (counters != null) {
                         ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
                         totalSubmitSent += txSubmitSM.getRequest();
-                        totalSubmitResponseOk += txSubmitSM.getResponseCommandStatusCounter().get(0);
-                        totalSubmitResponseError += txSubmitSM.getResponse() - txSubmitSM.getResponseCommandStatusCounter().get(0);
+                        totalSubmitResponseOk += max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
+                        totalSubmitResponseError += txSubmitSM.getResponse() - max(0, txSubmitSM.getResponseCommandStatusCounter().get(0));
                         totalDrReceived += counters.getRxDeliverSM().getRequest();
                     }
                 }
