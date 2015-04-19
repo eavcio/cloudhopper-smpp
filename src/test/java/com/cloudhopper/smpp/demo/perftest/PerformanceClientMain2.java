@@ -47,15 +47,17 @@ public class PerformanceClientMain2 {
     // performance testing options (just for this sample)
     //
     // total number of sessions (conns) to create
-    static public final int SESSION_COUNT = 10;
+    static public final int SESSION_COUNT = 60;
     // size of window per session
-    static public final int WINDOW_SIZE = 1;
+    static public final int WINDOW_SIZE = 5;
     // total number of submit to send total across all sessions
     static public final int SUBMIT_TO_SEND = 200000;
-    // total number of submit sent
-    static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
+    static public final int SUBMIT_DELAY = 1;
     static public final boolean DELIVERY_REPORTS = true;
     private static final int TIMEOUT_MILLIS = 10000;
+    
+      // total number of submit sent
+    static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
 
     static public void main(String[] args) throws Exception {
         //
@@ -121,7 +123,7 @@ public class PerformanceClientMain2 {
                 startSendingSignal.countDown();
 
                 supportExecutor.submit(new DeliveryReceiptReceivingMonitor(stopReceivingSignal, tasks));
-                supportExecutor.submit(new ThroughputLoggingTask(tasks));
+                supportExecutor.submit(new LoggingTask(tasks));
 
                 taskExecutor.shutdown();
                 taskExecutor.awaitTermination(3, TimeUnit.DAYS);
@@ -297,6 +299,7 @@ public class PerformanceClientMain2 {
 
                 // all threads compete for processing
                 while (session.isBound() && SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
+                    Thread.sleep(SUBMIT_DELAY);
                     SubmitSm submit = new SubmitSm();
                     submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
                     submit.setDestAddress(new Address((byte) 0x01, (byte) 0x01, "44555519205"));
@@ -413,8 +416,9 @@ public class PerformanceClientMain2 {
         }
     }
 
-    private static class ThroughputLoggingTask implements Runnable {
+    private static class LoggingTask implements Runnable {
         private static final Logger log = LoggerFactory.getLogger("perftest.throughput");
+        private static final Logger logTotal = LoggerFactory.getLogger("perftest.total");
 
         private ClientSessionTask[] tasks;
         int lastTotalSubmitSent = 0;
@@ -422,7 +426,7 @@ public class PerformanceClientMain2 {
         int lastTotalSubmitResponseOk = 0;
         int lastTotalSubmitResponseError = 0;
 
-        public ThroughputLoggingTask(ClientSessionTask[] tasks) {
+        public LoggingTask(ClientSessionTask[] tasks) {
             this.tasks = tasks;
         }
 
@@ -455,9 +459,9 @@ public class PerformanceClientMain2 {
                     int ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
                     int error = totalSubmitResponseError - lastTotalSubmitResponseError;
                     int dr = totalDrReceived - lastTotalDrReceived;
-                    log.info("throughput: sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
+                    log.info("sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
                     if (++j % 10 == 0) {
-                        log.info("     TOTAL: sent {}, ok {}, error {}, dr {}", totalSubmitSent, totalSubmitResponseOk, totalSubmitResponseError, totalDrReceived);
+                        logTotal.info("sent {}, ok {}, error {}, dr {}", totalSubmitSent, totalSubmitResponseOk, totalSubmitResponseError, totalDrReceived);
                     }
                     lastTotalSubmitSent = totalSubmitSent;
                     lastTotalSubmitResponseOk = totalSubmitResponseOk;
