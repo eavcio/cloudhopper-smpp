@@ -55,9 +55,7 @@ public class PerformanceClientMain2 {
     static public final int SUBMIT_DELAY = 1;
     static public final boolean DELIVERY_REPORTS = true;
     private static final int TIMEOUT_MILLIS = 10000;
-    
-      // total number of submit sent
-    static public final AtomicInteger SUBMIT_SENT = new AtomicInteger(0);
+
 
     static public void main(String[] args) throws Exception {
         //
@@ -94,12 +92,8 @@ public class PerformanceClientMain2 {
         // threads it will ever use, despite the "max pool size", etc. set on
         // the executor passed in here
         DefaultSmppClient clientBootstrap = new DefaultSmppClient(group, monitorExecutor);
+        TestState testState = new TestState();
 
-
-        // various latches used to signal when things are ready
-        ResultCountDownLatch allSessionsBoundSignal = new ResultCountDownLatch(SESSION_COUNT);
-        CountDownLatch startSendingSignal = new CountDownLatch(1);
-        CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
 
         // create all session runners and executors to run them
         ThreadPoolExecutor taskExecutor = (ThreadPoolExecutor) Executors.newCachedThreadPool();
@@ -108,7 +102,7 @@ public class PerformanceClientMain2 {
         for (int i = 0; i < SESSION_COUNT; i++) {
             SmppBindType smppBindType = i % 2 == 0 ? SmppBindType.RECEIVER : SmppBindType.TRANSMITTER;
 //            SmppBindType smppBindType = SmppBindType.TRANSCEIVER;
-            tasks[i] = new ClientSessionTask(allSessionsBoundSignal, startSendingSignal, stopReceivingSignal, clientBootstrap, getSmppSessionConfiguration(smppBindType));
+            tasks[i] = new ClientSessionTask(testState, clientBootstrap, getSmppSessionConfiguration(smppBindType));
             taskExecutor.submit(tasks[i]);
         }
         ExecutorService supportExecutor = Executors.newCachedThreadPool();
@@ -116,13 +110,13 @@ public class PerformanceClientMain2 {
         try {
             // wait for all sessions to bind
             logger.info("Waiting up to 7 seconds for all sessions to bind...");
-            if (allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
+            if (testState.allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
 
                 logger.info("Sending signal to start test...");
                 long startTimeMillis = System.currentTimeMillis();
-                startSendingSignal.countDown();
+                testState.startSendingSignal.countDown();
 
-                supportExecutor.submit(new DeliveryReceiptReceivingMonitor(stopReceivingSignal, tasks));
+                supportExecutor.submit(new DeliveryReceiptReceivingMonitor(testState, tasks));
                 supportExecutor.submit(new LoggingTask(tasks));
 
                 taskExecutor.shutdown();
@@ -221,19 +215,15 @@ public class PerformanceClientMain2 {
     public static class ClientSessionTask implements Runnable {
 
         private SmppSession session;
-        private ResultCountDownLatch allSessionsBoundSignal;
-        private CountDownLatch startSendingSignal;
-        private CountDownLatch stopReceivingSignal;
         private DefaultSmppClient clientBootstrap;
         private SmppSessionConfiguration config;
         private Exception cause;
         protected SmppSessionCounters counters;
         private volatile Long sendingMtDoneTimestamp;
+        private TestState testState;
 
-        public ClientSessionTask(ResultCountDownLatch allSessionsBoundSignal, CountDownLatch startSendingSignal, CountDownLatch stopReceivingSignal, DefaultSmppClient clientBootstrap, SmppSessionConfiguration config) {
-            this.allSessionsBoundSignal = allSessionsBoundSignal;
-            this.startSendingSignal = startSendingSignal;
-            this.stopReceivingSignal = stopReceivingSignal;
+        public ClientSessionTask(TestState testState, DefaultSmppClient clientBootstrap, SmppSessionConfiguration config) {
+            this.testState = testState;
             this.clientBootstrap = clientBootstrap;
             this.config = config;
         }
@@ -256,7 +246,7 @@ public class PerformanceClientMain2 {
                 counters = session.getCounters();
 
                 // don't start sending until signalled
-                allSessionsBoundSignal.countDown();
+                testState.allSessionsBoundSignal.countDown();
                 if (config.getType() == SmppBindType.RECEIVER) {
                     waitForDr();
                 } else {
@@ -276,7 +266,7 @@ public class PerformanceClientMain2 {
 
                 session.unbind(5000);
             } catch (Exception e) {
-                allSessionsBoundSignal.fail();
+                testState.allSessionsBoundSignal.fail();
                 logger.error("", e);
                 this.cause = e;
             }
@@ -284,7 +274,7 @@ public class PerformanceClientMain2 {
 
         private void waitForDr() throws InterruptedException {
             while (session.isBound()) {
-                if (stopReceivingSignal.await(5, TimeUnit.SECONDS)) {
+                if (testState.stopReceivingSignal.await(5, TimeUnit.SECONDS)) {
                     break;
                 }
             }
@@ -295,10 +285,10 @@ public class PerformanceClientMain2 {
                 String text160 = "\u20AC Lorem [ipsum] dolor sit amet, consectetur adipiscing elit. Proin feugiat, leo id commodo tincidunt, nibh diam ornare est, vitae accumsan risus lacus sed sem metus.";
                 byte[] textBytes = CharsetUtil.encode(text160, CharsetUtil.CHARSET_GSM);
 
-                startSendingSignal.await();
+                testState.startSendingSignal.await();
 
                 // all threads compete for processing
-                while (session.isBound() && SUBMIT_SENT.getAndIncrement() < SUBMIT_TO_SEND) {
+                while (session.isBound() && testState.submitSmSentCount.getAndIncrement() < SUBMIT_TO_SEND) {
                     Thread.sleep(SUBMIT_DELAY);
                     SubmitSm submit = new SubmitSm();
                     submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
@@ -371,12 +361,12 @@ public class PerformanceClientMain2 {
     private static class DeliveryReceiptReceivingMonitor implements Runnable {
         private static final Logger log = LoggerFactory.getLogger(DeliveryReceiptReceivingMonitor.class);
 
-        private CountDownLatch stopReceivingSignal;
+        private TestState testState;
         private ClientSessionTask[] tasks;
         private long lastDrCount;
 
-        public DeliveryReceiptReceivingMonitor(CountDownLatch stopReceivingSignal, ClientSessionTask[] tasks) {
-            this.stopReceivingSignal = stopReceivingSignal;
+        public DeliveryReceiptReceivingMonitor(TestState testState, ClientSessionTask[] tasks) {
+            this.testState = testState;
             this.tasks = tasks;
         }
 
@@ -397,7 +387,7 @@ public class PerformanceClientMain2 {
                         }
                         if (sendingDone && lastDrCount - drCount == 0) {
                             logger.info("No more DRs are coming, stop receiving.");
-                            stopReceivingSignal.countDown();
+                            testState.stopReceivingSignal.countDown();
                             return;
                         }
                         lastDrCount = drCount;
@@ -414,6 +404,14 @@ public class PerformanceClientMain2 {
         private boolean isDr() {
             return DELIVERY_REPORTS;
         }
+    }
+
+    private static class TestState {
+        // various latches used to signal when things are ready
+        ResultCountDownLatch allSessionsBoundSignal = new ResultCountDownLatch(SESSION_COUNT);
+        CountDownLatch startSendingSignal = new CountDownLatch(1);
+        CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
+        AtomicInteger submitSmSentCount = new AtomicInteger(0);
     }
 
     private static class LoggingTask implements Runnable {
