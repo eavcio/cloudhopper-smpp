@@ -670,6 +670,10 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             if (isUnbinding() || isClosed()) {
                 logger.debug("Unbind/close was requested, ignoring exception thrown: {}", t);
             } else {
+                // just to be sure, in case fireChannelClosed was not called, set the state to closed
+                if (t instanceof ClosedChannelException) {
+                    this.state.set(STATE_CLOSED);
+                } 
                 this.sessionHandler.fireUnknownThrowable(t);
             }
         }
