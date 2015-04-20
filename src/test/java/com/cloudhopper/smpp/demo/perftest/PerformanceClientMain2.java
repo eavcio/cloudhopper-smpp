@@ -31,6 +31,7 @@ import com.cloudhopper.smpp.pdu.SubmitSm;
 import com.cloudhopper.smpp.type.*;
 import com.cloudhopper.smpp.util.ConcurrentCommandCounter;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,8 +51,10 @@ public class PerformanceClientMain2 {
     static public final int SESSION_COUNT = 60;
     // size of window per session
     static public final int WINDOW_SIZE = 5;
-    // total number of submit to send total across all sessions
-    static public final int SUBMIT_TO_SEND = 200000;
+
+    //    static public final ExitCondition EXIT_CONDITION = ExitCondition.totalSubmitSmCount(200000);
+    static public final ExitCondition EXIT_CONDITION = ExitCondition.duration(1, TimeUnit.MINUTES);
+
     static public final int SUBMIT_DELAY = 1;
     static public final boolean DELIVERY_REPORTS = true;
     private static final int TIMEOUT_MILLIS = 10000;
@@ -100,7 +103,7 @@ public class PerformanceClientMain2 {
         ClientSessionTask[] tasks = new ClientSessionTask[SESSION_COUNT];
 
         for (int i = 0; i < SESSION_COUNT; i++) {
-            SmppBindType smppBindType = i % 2 == 0 ? SmppBindType.RECEIVER : SmppBindType.TRANSMITTER;
+            SmppBindType smppBindType = i % 2 == 0 ? SmppBindType.TRANSMITTER : SmppBindType.RECEIVER;
 //            SmppBindType smppBindType = SmppBindType.TRANSCEIVER;
             tasks[i] = new ClientSessionTask(testState, clientBootstrap, getSmppSessionConfiguration(smppBindType));
             taskExecutor.submit(tasks[i]);
@@ -113,7 +116,7 @@ public class PerformanceClientMain2 {
             if (testState.allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
 
                 logger.info("Sending signal to start test...");
-                long startTimeMillis = System.currentTimeMillis();
+                testState.startTime = System.currentTimeMillis();
                 testState.startSendingSignal.countDown();
 
                 supportExecutor.submit(new DeliveryReceiptReceivingMonitor(testState, tasks));
@@ -122,7 +125,7 @@ public class PerformanceClientMain2 {
                 taskExecutor.shutdown();
                 taskExecutor.awaitTermination(3, TimeUnit.DAYS);
 
-                printStats(tasks, startTimeMillis);
+                printStats(tasks, testState);
 
                 logger.info("Done. Exiting");
             } else {
@@ -158,7 +161,7 @@ public class PerformanceClientMain2 {
         return config;
     }
 
-    private static void printStats(ClientSessionTask[] tasks, long startTimeMillis) {
+    private static void printStats(ClientSessionTask[] tasks, TestState testState) {
         long stopTimeMillisMt = -1;
         for (ClientSessionTask task : tasks) {
             if (task.sendingMtDoneTimestamp != null) {
@@ -188,13 +191,12 @@ public class PerformanceClientMain2 {
         logger.info("       Sessions: " + SESSION_COUNT);
         logger.info("    Window Size: " + WINDOW_SIZE);
         logger.info("Sessions Failed: " + sessionFailures);
-        logger.info("           Time: " + (stopTimeMillisMt - startTimeMillis) + " ms");
-        logger.info("  Target Submit: " + SUBMIT_TO_SEND);
+        logger.info("           Time: " + (stopTimeMillisMt - testState.startTime) / 1000 + " s");
         logger.info("  Actual Submit: " + actualSubmitSent);
         logger.info(" Submit Resp Ok: " + actualSubmitResponseOk);
         logger.info("Submit Resp Err: " + actualSubmitResponseError);
         logger.info("    DR Received: " + actualDrReceived);
-        double throughputMt = (double) actualSubmitSent / ((double) (stopTimeMillisMt - startTimeMillis) / (double) 1000);
+        double throughputMt = (double) actualSubmitSent / ((double) (stopTimeMillisMt - testState.startTime) / (double) 1000);
         logger.info("   Throughput MT: " + DecimalUtil.toString(throughputMt, 3) + " per sec");
 
         for (int i = 0; i < SESSION_COUNT; i++) {
@@ -206,7 +208,7 @@ public class PerformanceClientMain2 {
         for (int i = 0; i < SESSION_COUNT; i++) {
             ClientSessionTask task = tasks[i];
             if (task.counters != null && task.config.getType() != SmppBindType.TRANSMITTER) {
-                logger.info(" Session " + i + ": deliverSm {}", task.session.getCounters().getRxDeliverSM());
+                logger.info(" Session " + i + ": deliverSM {}", task.session.getCounters().getRxDeliverSM());
             }
         }
     }
@@ -288,8 +290,7 @@ public class PerformanceClientMain2 {
                 testState.startSendingSignal.await();
 
                 // all threads compete for processing
-                while (session.isBound() && testState.submitSmSentCount.getAndIncrement() < SUBMIT_TO_SEND) {
-                    Thread.sleep(SUBMIT_DELAY);
+                while (session.isBound() && EXIT_CONDITION.shouldRun(testState)) {
                     SubmitSm submit = new SubmitSm();
                     submit.setSourceAddress(new Address((byte) 0x03, (byte) 0x00, "40404"));
                     submit.setDestAddress(new Address((byte) 0x01, (byte) 0x01, "44555519205"));
@@ -298,6 +299,7 @@ public class PerformanceClientMain2 {
                     }
                     submit.setShortMessage(textBytes);
                     session.sendRequestPdu(submit, TIMEOUT_MILLIS, false);
+                    Thread.sleep(SUBMIT_DELAY);
                 }
             } finally {
                 sendingMtDoneTimestamp = System.currentTimeMillis();
@@ -412,6 +414,7 @@ public class PerformanceClientMain2 {
         CountDownLatch startSendingSignal = new CountDownLatch(1);
         CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
         AtomicInteger submitSmSentCount = new AtomicInteger(0);
+        Long startTime;
     }
 
     private static class LoggingTask implements Runnable {
@@ -476,4 +479,49 @@ public class PerformanceClientMain2 {
         }
     }
 
+    private static abstract class ExitCondition {
+        /**
+         * beware, side effect in TotalSubmitSmCondition :(
+         */
+        public abstract boolean shouldRun(TestState testState);
+
+        public static ExitCondition totalSubmitSmCount(int submitsToSend) {
+            return new TotalSubmitSmCondition(submitsToSend);
+        }
+
+        public static ExitCondition duration(long duration, TimeUnit unit) {
+            return new DurationCondition(duration, unit);
+        }
+
+        private static class DurationCondition extends ExitCondition {
+
+            protected Instant testEnd;
+            protected long durationMillis;
+
+            public DurationCondition(long duration, TimeUnit unit) {
+                durationMillis = TimeUnit.MILLISECONDS.convert(duration, unit);
+            }
+
+            @Override
+            public boolean shouldRun(TestState testState) {
+                if (testEnd == null) { //no need to synchronize
+                    testEnd = new Instant(testState.startTime + durationMillis);
+                }
+                return testEnd.isAfterNow();
+            }
+        }
+
+        private static class TotalSubmitSmCondition extends ExitCondition {
+            private int submitsToSend;
+
+            public TotalSubmitSmCondition(int submitsToSend) {
+                this.submitsToSend = submitsToSend;
+            }
+
+            @Override
+            public boolean shouldRun(TestState testState) {
+                return testState.submitSmSentCount.getAndIncrement() < submitsToSend;
+            }
+        }
+    }
 }
