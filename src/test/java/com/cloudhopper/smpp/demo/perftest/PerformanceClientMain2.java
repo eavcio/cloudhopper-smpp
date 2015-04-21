@@ -95,8 +95,8 @@ public class PerformanceClientMain2 {
         // threads it will ever use, despite the "max pool size", etc. set on
         // the executor passed in here
         DefaultSmppClient clientBootstrap = new DefaultSmppClient(group, monitorExecutor);
-        TestState testState = new TestState();
 
+        TestState testState = new TestState();
 
         // create all session runners and executors to run them
         ThreadPoolExecutor taskExecutor = (ThreadPoolExecutor) Executors.newCachedThreadPool();
@@ -168,12 +168,11 @@ public class PerformanceClientMain2 {
                 stopTimeMillisMt = max(task.sendingMtDoneTimestamp, stopTimeMillisMt);
             }
         }
-        // did everything succeed?
-        int actualSubmitSent = 0;
-        int sessionFailures = 0;
-        int actualDrReceived = 0;
-        int actualSubmitResponseOk = 0;
-        int actualSubmitResponseError = 0;
+        long actualSubmitSent = 0;
+        long sessionFailures = 0;
+        long actualDrReceived = 0;
+        long actualSubmitResponseOk = 0;
+        long actualSubmitResponseError = 0;
         for (int i = 0; i < SESSION_COUNT; i++) {
             if (tasks[i].getCause() != null) {
                 sessionFailures++;
@@ -422,10 +421,10 @@ public class PerformanceClientMain2 {
         private static final Logger logTotal = LoggerFactory.getLogger("perftest.total");
 
         private ClientSessionTask[] tasks;
-        int lastTotalSubmitSent = 0;
-        int lastTotalDrReceived = 0;
-        int lastTotalSubmitResponseOk = 0;
-        int lastTotalSubmitResponseError = 0;
+        long lastTotalSubmitSent = 0;
+        long lastTotalDrReceived = 0;
+        long lastTotalSubmitResponseOk = 0;
+        long lastTotalSubmitResponseError = 0;
 
         public LoggingTask(ClientSessionTask[] tasks) {
             this.tasks = tasks;
@@ -436,10 +435,10 @@ public class PerformanceClientMain2 {
             try {
                 int j = 0;
                 while (true) {
-                    int totalSubmitSent = 0;
-                    int totalDrReceived = 0;
-                    int totalSubmitResponseOk = 0;
-                    int totalSubmitResponseError = 0;
+                    long totalSubmitSent = 0;
+                    long totalDrReceived = 0;
+                    long totalSubmitResponseOk = 0;
+                    long totalSubmitResponseError = 0;
                     for (int i = 0; i < SESSION_COUNT; i++) {
                         SmppSessionCounters counters = tasks[i].counters;
                         if (counters != null) {
@@ -456,10 +455,10 @@ public class PerformanceClientMain2 {
                         }
                     }
 
-                    int sent = totalSubmitSent - lastTotalSubmitSent;
-                    int ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
-                    int error = totalSubmitResponseError - lastTotalSubmitResponseError;
-                    int dr = totalDrReceived - lastTotalDrReceived;
+                    long sent = totalSubmitSent - lastTotalSubmitSent;
+                    long ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
+                    long error = totalSubmitResponseError - lastTotalSubmitResponseError;
+                    long dr = totalDrReceived - lastTotalDrReceived;
                     log.info("sent {}, ok {}, error {}, dr {}", sent, ok, error, dr);
                     if (++j % 10 == 0) {
                         logTotal.info("sent {}, ok {}, error {}, dr {}", totalSubmitSent, totalSubmitResponseOk, totalSubmitResponseError, totalDrReceived);
