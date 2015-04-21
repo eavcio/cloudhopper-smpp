@@ -38,6 +38,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.Math.max;
 
@@ -52,7 +53,7 @@ public class PerformanceClientMain2 {
     // size of window per session
     static public final int WINDOW_SIZE = 5;
 
-    //    static public final ExitCondition EXIT_CONDITION = ExitCondition.totalSubmitSmCount(200000);
+//        static public final ExitCondition EXIT_CONDITION = ExitCondition.totalSubmitSmCount(200000);
     static public final ExitCondition EXIT_CONDITION = ExitCondition.duration(1, TimeUnit.MINUTES);
 
     static public final int SUBMIT_DELAY = 1;
@@ -412,7 +413,7 @@ public class PerformanceClientMain2 {
         ResultCountDownLatch allSessionsBoundSignal = new ResultCountDownLatch(SESSION_COUNT);
         CountDownLatch startSendingSignal = new CountDownLatch(1);
         CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
-        AtomicInteger submitSmSentCount = new AtomicInteger(0);
+        AtomicLong submitSmSentCount = new AtomicLong(0);
         Long startTime;
     }
 
@@ -484,7 +485,7 @@ public class PerformanceClientMain2 {
          */
         public abstract boolean shouldRun(TestState testState);
 
-        public static ExitCondition totalSubmitSmCount(int submitsToSend) {
+        public static ExitCondition totalSubmitSmCount(long submitsToSend) {
             return new TotalSubmitSmCondition(submitsToSend);
         }
 
@@ -511,9 +512,9 @@ public class PerformanceClientMain2 {
         }
 
         private static class TotalSubmitSmCondition extends ExitCondition {
-            private int submitsToSend;
+            private long submitsToSend;
 
-            public TotalSubmitSmCondition(int submitsToSend) {
+            public TotalSubmitSmCondition(long submitsToSend) {
                 this.submitsToSend = submitsToSend;
             }
 
