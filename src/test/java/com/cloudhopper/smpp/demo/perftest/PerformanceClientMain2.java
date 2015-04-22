@@ -42,6 +42,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.Math.max;
 
+// config logback to:
+//
+//  <logger name="com.cloudhopper" level="WARN"/>
+//  <logger name="com.cloudhopper.smpp.demo.perftest" level="info"/>
+//  <logger name="perftest" level="info"/>
 public class PerformanceClientMain2 {
     private static final Logger logger = LoggerFactory.getLogger(PerformanceClientMain2.class);
 
