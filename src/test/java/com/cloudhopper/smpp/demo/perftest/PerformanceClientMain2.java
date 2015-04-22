@@ -122,9 +122,7 @@ public class PerformanceClientMain2 {
             logger.info("Waiting up to 7 seconds for all sessions to bind...");
             if (testState.allSessionsBoundSignal.await(7000, TimeUnit.MILLISECONDS)) {
 
-                logger.info("Sending signal to start test...");
-                testState.startTime = System.currentTimeMillis();
-                testState.startSendingSignal.countDown();
+                testState.start();
 
                 supportExecutor.submit(new DeliveryReceiptReceivingMonitor(testState, tasks));
                 supportExecutor.submit(new LoggingTask(tasks));
@@ -143,8 +141,6 @@ public class PerformanceClientMain2 {
             }
         } finally {
             logger.info("Shutting down client bootstrap and executors...");
-            // this is required to not causing server to hang from non-daemon threads
-            // this also makes sure all open Channels are closed to I *think*
             supportExecutor.shutdownNow();
             taskExecutor.shutdownNow();
             clientBootstrap.destroy();
@@ -261,14 +257,7 @@ public class PerformanceClientMain2 {
                 if (config.getType() == SmppBindType.RECEIVER) {
                     waitForDr();
                 } else {
-                    startSending();
-                    // all threads have sent all submit, we do need to wait for
-                    // an acknowledgement for all "inflight" though (synchronize
-                    // against the window)
-                    logger.debug("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
-
-                    allSubmitResponseReceivedSignal.await();
-                    logger.debug("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
+                    sendSubmitSm(allSubmitResponseReceivedSignal);
 
                     if (config.getType() == SmppBindType.TRANSCEIVER) {
                         waitForDr();
@@ -283,15 +272,7 @@ public class PerformanceClientMain2 {
             }
         }
 
-        private void waitForDr() throws InterruptedException {
-            while (session.isBound()) {
-                if (testState.stopReceivingSignal.await(5, TimeUnit.SECONDS)) {
-                    break;
-                }
-            }
-        }
-
-        private void startSending() throws InterruptedException, RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException {
+        private void sendSubmitSm(CountDownLatch allSubmitResponseReceivedSignal) throws InterruptedException, RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException {
             try {
                 String text160 = "\u20AC Lorem [ipsum] dolor sit amet, consectetur adipiscing elit. Proin feugiat, leo id commodo tincidunt, nibh diam ornare est, vitae accumsan risus lacus sed sem metus.";
                 byte[] textBytes = CharsetUtil.encode(text160, CharsetUtil.CHARSET_GSM);
@@ -312,6 +293,21 @@ public class PerformanceClientMain2 {
                 }
             } finally {
                 sendingMtDoneTimestamp = System.currentTimeMillis();
+            }
+            // all threads have sent all submit, we do need to wait for
+            // an acknowledgement for all "inflight" though (synchronize
+            // against the window)
+            logger.debug("before waiting sendWindow.size: {}", session.getSendWindow().getSize());
+
+            allSubmitResponseReceivedSignal.await();
+            logger.debug("after waiting sendWindow.size: {}", session.getSendWindow().getSize());
+        }
+
+        private void waitForDr() throws InterruptedException {
+            while (session.isBound()) {
+                if (testState.stopReceivingSignal.await(5, TimeUnit.SECONDS)) {
+                    break;
+                }
             }
         }
 
@@ -426,6 +422,12 @@ public class PerformanceClientMain2 {
         Long startTime;
         volatile boolean stopTest;
 
+        private void start() {
+            logger.info("Sending signal to start test...");
+            startTime = System.currentTimeMillis();
+            startSendingSignal.countDown();
+        }
+
         private void stop() {
             stopReceivingSignal.countDown();
             stopTest = true;
@@ -451,25 +453,11 @@ public class PerformanceClientMain2 {
             try {
                 int j = 0;
                 while (true) {
-                    long totalSubmitSent = 0;
-                    long totalDrReceived = 0;
-                    long totalSubmitResponseOk = 0;
-                    long totalSubmitResponseError = 0;
-                    for (int i = 0; i < SESSION_COUNT; i++) {
-                        SmppSessionCounters counters = tasks[i].counters;
-                        if (counters != null) {
-                            ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
-                            totalSubmitSent += txSubmitSM.getRequest();
-                            for (Map.Entry<Integer, Integer> entry : txSubmitSM.getResponseCommandStatusCounter().createSortedMapSnapshot().entrySet()) {
-                                if (entry.getKey() == 0) {
-                                    totalSubmitResponseOk += entry.getValue();
-                                } else {
-                                    totalSubmitResponseError += entry.getValue();
-                                }
-                            }
-                            totalDrReceived += counters.getRxDeliverSM().getRequest();
-                        }
-                    }
+                    CountersSum countersSum = new CountersSum().invoke();
+                    long totalSubmitSent = countersSum.totalSubmitSent;
+                    long totalSubmitResponseOk = countersSum.totalSubmitResponseOk;
+                    long totalSubmitResponseError = countersSum.totalSubmitResponseError;
+                    long totalDrReceived = countersSum.totalDrReceived;
 
                     long sent = totalSubmitSent - lastTotalSubmitSent;
                     long ok = totalSubmitResponseOk - lastTotalSubmitResponseOk;
@@ -490,6 +478,36 @@ public class PerformanceClientMain2 {
                 return;
             } catch (Exception e) {
                 log.error("", e);
+            }
+        }
+
+        private class CountersSum {
+            private long totalSubmitSent;
+            private long totalDrReceived;
+            private long totalSubmitResponseOk;
+            private long totalSubmitResponseError;
+
+            public CountersSum invoke() {
+                totalSubmitSent = 0;
+                totalDrReceived = 0;
+                totalSubmitResponseOk = 0;
+                totalSubmitResponseError = 0;
+                for (int i = 0; i < SESSION_COUNT; i++) {
+                    SmppSessionCounters counters = tasks[i].counters;
+                    if (counters != null) {
+                        ConcurrentCommandCounter txSubmitSM = counters.getTxSubmitSM();
+                        totalSubmitSent += txSubmitSM.getRequest();
+                        for (Map.Entry<Integer, Integer> entry : txSubmitSM.getResponseCommandStatusCounter().createSortedMapSnapshot().entrySet()) {
+                            if (entry.getKey() == 0) {
+                                totalSubmitResponseOk += entry.getValue();
+                            } else {
+                                totalSubmitResponseError += entry.getValue();
+                            }
+                        }
+                        totalDrReceived += counters.getRxDeliverSM().getRequest();
+                    }
+                }
+                return this;
             }
         }
     }
