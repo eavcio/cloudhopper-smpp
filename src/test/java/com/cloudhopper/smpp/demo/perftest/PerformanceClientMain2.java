@@ -594,7 +594,6 @@ public class PerformanceClientMain2 {
                 while (System.in.available() == 0) {
                     Thread.sleep(1000);
                 }
-                System.in.read();
                 testState.stop();
             } catch (IOException e) {
                 log.warn("", e);
