@@ -35,6 +35,7 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -127,9 +128,12 @@ public class PerformanceClientMain2 {
 
                 supportExecutor.submit(new DeliveryReceiptReceivingMonitor(testState, tasks));
                 supportExecutor.submit(new LoggingTask(tasks));
+                Future<?> future = supportExecutor.submit(new ManualExitMonitor(testState));
 
                 taskExecutor.shutdown();
                 taskExecutor.awaitTermination(3, TimeUnit.DAYS);
+
+                future.cancel(true);
 
                 printStats(tasks, testState);
 
@@ -420,6 +424,12 @@ public class PerformanceClientMain2 {
         CountDownLatch stopReceivingSignal = new CountDownLatch(DELIVERY_REPORTS ? 1 : 0);
         AtomicLong submitSmSentCount = new AtomicLong(0);
         Long startTime;
+        volatile boolean stopTest;
+
+        private void stop() {
+            stopReceivingSignal.countDown();
+            stopTest = true;
+        }
     }
 
     private static class LoggingTask implements Runnable {
@@ -491,11 +501,15 @@ public class PerformanceClientMain2 {
         public abstract boolean shouldRun(TestState testState);
 
         public static ExitCondition totalSubmitSmCount(long submitsToSend) {
-            return new TotalSubmitSmCondition(submitsToSend);
+            return manualExitCondition(new TotalSubmitSmCondition(submitsToSend));
         }
 
         public static ExitCondition duration(long duration, TimeUnit unit) {
-            return new DurationCondition(duration, unit);
+            return manualExitCondition(new DurationCondition(duration, unit));
+        }
+
+        private static ExitCondition manualExitCondition(ExitCondition exitCondition) {
+            return new ManualExitCondition(exitCondition);
         }
 
         private static class DurationCondition extends ExitCondition {
@@ -528,5 +542,49 @@ public class PerformanceClientMain2 {
                 return testState.submitSmSentCount.getAndIncrement() < submitsToSend;
             }
         }
+
+        private static class ManualExitCondition extends ExitCondition {
+            private ExitCondition exitCondition;
+
+            public ManualExitCondition(ExitCondition exitCondition) {
+                if (exitCondition instanceof ManualExitCondition) {
+                    throw new IllegalArgumentException();
+                }
+                this.exitCondition = exitCondition;
+            }
+
+            @Override
+            public boolean shouldRun(TestState testState) {
+                return !testState.stopTest && exitCondition.shouldRun(testState);
+            }
+        }
     }
+
+    private static class ManualExitMonitor implements Runnable {
+        private static final Logger log = LoggerFactory.getLogger(ManualExitMonitor.class);
+
+        private TestState testState;
+
+        public ManualExitMonitor(PerformanceClientMain2.TestState testState) {
+            this.testState = testState;
+        }
+
+        @Override
+        public void run() {
+            System.out.println("Press Enter to stop");
+            try {
+                while (System.in.available() == 0) {
+                    Thread.sleep(1000);
+                }
+                System.in.read();
+                testState.stop();
+            } catch (IOException e) {
+                log.warn("", e);
+            } catch (InterruptedException e) {
+//                ok
+            }
+        }
+
+    }
+
 }
