@@ -1,6 +1,8 @@
 Cloudhopper SMPP by Twitter [![Build Status](https://secure.travis-ci.org/twitter/cloudhopper-smpp.png?branch=master)](http://travis-ci.org/twitter/cloudhopper-smpp)
 ============================
 
+[![Join the chat at https://gitter.im/eavcio/cloudhopper-smpp](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/eavcio/cloudhopper-smpp?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 cloudhopper-smpp
 ------------------------
 
